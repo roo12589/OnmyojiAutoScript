@@ -2,6 +2,7 @@
 # @author runhey
 # github https://github.com/runhey
 from time import sleep
+import cv2
 from copy import deepcopy
 from cached_property import cached_property
 
@@ -20,6 +21,10 @@ class SoloExploration(BaseExploration):
     FRIEND_LEAVE_TIMEOUT = 3
     SEARCH_SWIPE_INTERVAL = 1.5
     MAX_SWIPE_COUNT = 2
+    TAB_SWITCH_MAX_ATTEMPTS = 3
+    CLOSE_PANEL_MAX_ATTEMPTS = 3
+    INVITE_PANEL_TIMEOUT = 10
+    INVITE_PANEL_GRACE = 2
     explore_init = False
     swipe_cnt: int = 0
     search_fail_timer: Timer = None
@@ -245,25 +250,25 @@ class SoloExploration(BaseExploration):
             elif scene == Scene.TEAM:
                 self.explore_init = False
                 self._reset_search_state(reset_swipe_cnt=True)
-                self.wait_until_stable(self.I_ADD_2, timer=Timer(0.8, 1))
+                # 队友已进房时加号本来就不存在，不能只用加号判断房间是否就绪
+                # 等待加号或挑战按钮渲染完成，再决定是邀请还是开战
+                timeout = Timer(10)
+                timeout.start()
+                while 1:
+                    self.screenshot()
+                    if self.appear(self.I_ADD_2) or self.appear(self.I_FIRE):
+                        break
+                    if timeout.reached():
+                        logger.warning('Wait team room timeout')
+                        break
                 if self.appear(self.I_FIRE, threshold=0.8) and not self.appear(self.I_ADD_2):
                     self.ui_click_until_disappear(self.I_FIRE, interval=1)
                     continue
                 if self.appear(self.I_ADD_2) and self.run_invite(config=self._invite_config, is_first=True):
                     continue
-                else:
-                    logger.warning('Invite failed, quit')
-                    while 1:
-                        self.screenshot()
-                        if self.appear(self.I_CHECK_EXPLORATION):
-                            break
-                        if self.appear_then_click(self.I_UI_CONFIRM, interval=0.5):
-                            continue
-                        if self.appear_then_click(self.I_UI_BACK_RED, interval=0.7):
-                            continue
-                        if self.appear_then_click(self.I_UI_BACK_YELLOW, interval=1):
-                            continue
-                    break
+                logger.warning('Invite failed, quit')
+                self._quit_team_room()
+                break
             ##
             elif scene == Scene.MAIN:
                 if not self.explore_init:
@@ -369,24 +374,154 @@ class SoloExploration(BaseExploration):
             elif scene == Scene.UNKNOWN:
                 continue
 
-    def invite_friend(self, name: str = None, find_mode: FindMode = FindMode.AUTO_FIND) -> bool:
+    def _invite_panel_open(self) -> bool:
+        """
+        邀请好友面板是否已经打开
+        """
+        return self.appear(self.I_INVITE_ENSURE) or self.appear(self.I_LOAD_FRIEND)
+
+    def _open_invite_panel(self) -> str:
+        """
+        点击加号打开邀请好友面板
+        :return: open 面板已打开, joined 队友已经进房, timeout 超时
+        """
         logger.info('Click add to invite friend')
-        # 点击＋号
+        add_clicked = False
+        add_click_cnt = 0
+        max_add_click = 3
+        grace_timer = Timer(self.INVITE_PANEL_GRACE)
+        timeout = Timer(self.INVITE_PANEL_TIMEOUT)
+        timeout.start()
         while 1:
             self.screenshot()
-            if self.appear(self.I_LOAD_FRIEND):
-                break
-            if self.appear(self.I_INVITE_ENSURE):
-                break
-            if self.appear_then_click(self.I_ADD_2, interval=1):
+            if self._invite_panel_open():
+                return 'open'
+            if add_click_cnt < max_add_click and self.appear_then_click(self.I_ADD_2, interval=1):
+                add_clicked = True
+                add_click_cnt += 1
                 continue
-            if self.appear_then_click(self.I_ADD_5_4, interval=1):
+            if add_click_cnt < max_add_click and self.appear_then_click(self.I_ADD_5_4, interval=1):
+                add_clicked = True
+                add_click_cnt += 1
                 continue
-            # 避免中途队友进来邀请死循环
-            if not self.appear(self.I_ADD_2) or not self.appear(self.I_ADD_5_4):
-                # 可能刚好点到人，点一下空地方
-                self.device.click(x=370, y=480, control_name='exploration_invite_friend_prevent')
+            if add_clicked and not self.appear(self.I_ADD_2) and not self.appear(self.I_ADD_5_4):
+                # 加号消失：可能是面板正在弹出，也可能队友已经进房，等待一段时间再确认
+                if not grace_timer.started():
+                    grace_timer.start()
+                if grace_timer.reached():
+                    self.screenshot()
+                    if self._invite_panel_open():
+                        return 'open'
+                    if not self.appear(self.I_ADD_2) and not self.appear(self.I_ADD_5_4):
+                        logger.info('Add button disappeared, teammate maybe joined')
+                        self.device.click(x=370, y=480, control_name='exploration_invite_friend_prevent')
+                        return 'joined'
+            if timeout.reached():
+                logger.warning('Invite panel not appear')
+                return 'timeout'
+
+    def _close_invite_panel(self) -> None:
+        """
+        关闭邀请好友面板，避免任务停留在邀请界面
+        """
+        if not self._invite_panel_open():
+            return
+        logger.info('Close invite panel')
+        for _ in range(self.CLOSE_PANEL_MAX_ATTEMPTS):
+            self.screenshot()
+            if not self._invite_panel_open():
+                return
+            x, y = self.I_INVITE_ENSURE.coord()
+            self.device.click(x=x, y=y, control_name=self.I_INVITE_ENSURE.name)
+            sleep(1)
+        self.screenshot()
+        if not self._invite_panel_open():
+            return
+        # 没有选中好友时点“邀请”不会关闭列表，点“取消”退出
+        for _ in range(self.CLOSE_PANEL_MAX_ATTEMPTS):
+            self.device.click(x=474, y=580, control_name='exploration_invite_cancel')
+            sleep(1)
+            self.screenshot()
+            if not self._invite_panel_open():
+                return
+        logger.warning('Close invite panel failed')
+
+    def _friend_tab_on_flags(self) -> list:
+        """
+        第 2 个标签的 ON 资源 roi 被改到了标签栏上方的空白区(#1844)，深拷贝并还原成 #1443 的 roi
+        """
+        flag_2_on = deepcopy(self.I_FLAG_2_ON)
+        flag_2_on.roi_front = [471, 128, 54, 18]
+        flag_2_on.roi_back = (471, 128, 54, 18)
+        return [self.I_FLAG_1_ON, flag_2_on, self.I_FLAG_3_ON, self.I_FLAG_4_ON]
+
+    def _tab_is_active(self, flag_on) -> bool:
+        """
+        标签是否处于选中态。match_mean_color 默认使用扩展 2px 的 roi_back，
+        会把标签边框算进均值导致选中态判断恒为 False，这里显式使用紧凑的 roi_front
+        """
+        mean = cv2.mean(flag_on.corp(self.device.image, flag_on.roi_front))[:3]
+        return all(abs(mean[i] - self.INVITE_FLAG_ON[i]) <= 10 for i in range(3))
+
+    def _switch_friend_tab(self, index: int) -> bool:
+        """
+        切换到指定好友标签，点击次数有上限，避免 GameTooManyClickError
+        """
+        flag_on = self._friend_tab_on_flags()[index]
+        flag_off = [self.I_FLAG_1_OFF, self.I_FLAG_2_OFF, self.I_FLAG_3_OFF, self.I_FLAG_4_OFF][index]
+        for attempt in range(self.TAB_SWITCH_MAX_ATTEMPTS):
+            self.screenshot()
+            if self._tab_is_active(flag_on):
                 return True
+            if attempt:
+                sleep(0.8)
+            x, y = flag_off.coord()
+            self.device.click(x=x, y=y, control_name=flag_off.name)
+        self.screenshot()
+        if self._tab_is_active(flag_on):
+            return True
+        logger.warning(f'Switch friend tab failed: {flag_off.name}')
+        return False
+
+    def _quit_team_room(self) -> None:
+        """
+        退出组队房间回到探索界面。会处理“确认退出探索吗？”弹窗，
+        并对每个按钮的点击次数设置上限，避免无限连点触发 GameTooManyClickError
+        """
+        logger.info('Quit team room')
+        if self._invite_panel_open():
+            self._close_invite_panel()
+        timeout = Timer(20)
+        timeout.start()
+        max_click = 3
+        confirm_cnt = back_red_cnt = back_yellow_cnt = 0
+        while 1:
+            self.screenshot()
+            if self.appear(self.I_CHECK_EXPLORATION):
+                break
+            if timeout.reached():
+                logger.warning('Quit team room timeout')
+                break
+            if confirm_cnt < max_click and self.appear_then_click(self.I_E_EXIT_CONFIRM, interval=1):
+                confirm_cnt += 1
+                continue
+            if confirm_cnt < max_click and self.appear_then_click(self.I_UI_CONFIRM, interval=1):
+                confirm_cnt += 1
+                continue
+            if back_red_cnt < max_click and self.appear_then_click(self.I_UI_BACK_RED, interval=1):
+                back_red_cnt += 1
+                continue
+            if back_yellow_cnt < max_click and self.appear_then_click(self.I_UI_BACK_YELLOW, interval=1):
+                back_yellow_cnt += 1
+                continue
+            sleep(0.2)
+
+    def invite_friend(self, name: str = None, find_mode: FindMode = FindMode.AUTO_FIND) -> bool:
+        open_result = self._open_invite_panel()
+        if open_result == 'joined':
+            return True
+        if open_result != 'open':
+            return False
 
         friend_class = []
         class_ocr = [self.O_F_LIST_1, self.O_F_LIST_2, self.O_F_LIST_3, self.O_F_LIST_4]
@@ -417,38 +552,22 @@ class SoloExploration(BaseExploration):
                 friend_class[i] = '跨区'
         logger.info(f'Friend class: {friend_class}')
 
-        # 76e2a874(#1509) 把 I_FLAG_2_ON 的 roi 改到了 tab 标签栏上方的空白区
-        # (472,82,32,11) / (454,74,56,26)，导致第 2 个 tab 的选中态永远匹配不上，
-        # while index == 1 死循环点满 10 次触发 GameTooManyClickError。
-        # 这里深拷贝一份并还原成 439be142(#1443) 的 roi，不改动原资源。
-        # https://github.com/runhey/OnmyojiAutoScript/issues/1844
-        flag_2_on = deepcopy(self.I_FLAG_2_ON)
-        flag_2_on.roi_front = [471, 128, 54, 18]
-        flag_2_on.roi_back = (471, 128, 54, 18)
-
         is_select: bool = False  # 是否选中了好友
         if find_mode == FindMode.RECENT_FRIEND:
             logger.info('Find recent friend')
-            # 获取’最近‘在friend_class中的index
             if '最近' not in friend_class:
-                logger.warning('No recent friend')
-                return False
-            recent_index = friend_class.index('最近')
-            while recent_index == 1:
-                self.screenshot()
-                if self.appear(flag_2_on):
-                    break
-                if self.appear_then_click(self.I_FLAG_2_OFF, interval=1):
-                    continue
-
-            logger.info(f'Now find friend in ”最近“')
-            sleep(1)
-            if not is_select:
+                # 探索好友列表没有“最近”标签，退化为自动查找，不能直接返回并把面板留在界面上
+                logger.warning('No recent friend tab, fallback to auto find')
+                find_mode = FindMode.AUTO_FIND
+            else:
+                recent_index = friend_class.index('最近')
+                self._switch_friend_tab(recent_index)
+                logger.info('Now find friend in ”最近“')
+                sleep(1)
                 if self.detect_select(name):
                     is_select = True
-            sleep(1)
-            if not is_select:
-                if self.detect_select(name):
+                sleep(1)
+                if not is_select and self.detect_select(name):
                     is_select = True
 
         for index in range(len(friend_class)):
@@ -459,30 +578,8 @@ class SoloExploration(BaseExploration):
             if is_select:
                 continue
             # 首先切换到不同的好友列表
-            while index == 0:
-                self.screenshot()
-                if self.I_FLAG_1_ON.match_mean_color(self.device.image, self.INVITE_FLAG_ON, 10):
-                    break
-                if self.click(self.I_FLAG_1_OFF, interval=1):
-                    continue
-            while index == 1:
-                self.screenshot()
-                if flag_2_on.match_mean_color(self.device.image, self.INVITE_FLAG_ON, 10):
-                    break
-                if self.click(self.I_FLAG_2_OFF, interval=1):
-                    continue
-            while index == 2:
-                self.screenshot()
-                if self.I_FLAG_3_ON.match_mean_color(self.device.image, self.INVITE_FLAG_ON, 10):
-                    break
-                if self.click(self.I_FLAG_3_OFF, interval=1):
-                    continue
-            while index == 3:
-                self.screenshot()
-                if self.I_FLAG_4_ON.match_mean_color(self.device.image, self.INVITE_FLAG_ON, 10):
-                    break
-                if self.click(self.I_FLAG_4_OFF, interval=1):
-                    continue
+            if not self._switch_friend_tab(index):
+                continue
 
             # 选中好友， 在这里游戏获取在线的好友并不是很快，根据不同的设备会有不同的时间，而且没有什么元素提供我们来判断
             # 所以这里就直接等待一段时间
@@ -496,23 +593,24 @@ class SoloExploration(BaseExploration):
                 if self.detect_select(name):
                     is_select = True
 
-        # 点击确定
+        # 点击邀请
         logger.info('Click invite ensure')
         if not self.appear(self.I_INVITE_ENSURE):
             logger.warning('No appear invite ensure while invite friend')
-        while 1:
+        for _ in range(self.CLOSE_PANEL_MAX_ATTEMPTS):
             self.screenshot()
-            if not self.appear(self.I_INVITE_ENSURE):
+            if not self._invite_panel_open():
                 break
-            if self.appear_then_click(self.I_INVITE_ENSURE):
-                continue
-        # 哪怕没有找到好友也有点击 确认 以退出好友列表
+            x, y = self.I_INVITE_ENSURE.coord()
+            self.device.click(x=x, y=y, control_name=self.I_INVITE_ENSURE.name)
+            sleep(1)
         if not is_select:
             logger.warning('No find friend')
-            # 这个时候任务运行失败
+            self._close_invite_panel()
             logger.info('Task failed')
             return False
-
+        if self._invite_panel_open():
+            self._close_invite_panel()
         return True
 
 
