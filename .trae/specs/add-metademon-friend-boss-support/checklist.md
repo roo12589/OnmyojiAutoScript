@@ -1,0 +1,13 @@
+- [x] `md_friend_boss_monitor`、`md_friend_boss_first` 配置项已添加，默认值分别为 False、False
+- [x] `auto_shared_boss` 文案已更新为「自动挑战好友发现的鬼王」，zh-CN 键值完整
+- [x] `O_BOSS_EMPTY_2` OCR 资源已添加且 `assets.py` 与 `ocr.json` 保持一致
+- [x] 好友槽位识别同时校验空槽模板与「剩余时间」OCR，空列表不会误点
+- [x] 槽位 2 点击目标已修正为 `I_BOSS_EMPTY_2`，不会误点槽位 1
+- [x] 好友优先开关生效：开启时好友槽位 1 → 2 → 自己，关闭时自己 → 好友槽位 1 → 2
+- [x] `auto_shared_boss` 关闭时不会点击任何好友槽位，也不会推送好友鬼王通知
+- [x] 选中鬼王后先等待 `I_BATTLE_DEMON`，再读取名称与血量阈值
+- [x] 监听开启时 3 秒轮询、60 秒无目标重进刷新、疲劳满/页面丢失 30 秒/外部停止可退出
+- [x] 好友鬼王通知按槽位去重，同一鬼王不重复推送
+- [x] `find_demon()` 有 10 秒超时，不会在无门票时无限空转
+- [x] 两个新开关默认关闭时行为与改动前一致（自己优先、50 秒退出）
+- [x] `python -m compileall tasks/MetaDemon` 通过，配置模型可正常加载

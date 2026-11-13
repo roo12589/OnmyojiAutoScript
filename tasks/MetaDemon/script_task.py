@@ -86,31 +86,37 @@ class ScriptTask(RightActivity, Battle, GeneralBattle, SwitchSoul, Star56):
             self.run_switch_soul_by_name(self.config.meta_demon.switch_soul.group_name,
                                          self.config.meta_demon.switch_soul.team_name)
 
-        self.enter(self.I_RIGHT_ENTER)
-        while 1:
-            self.screenshot()
-            if self.appear(self.I_FIND_DEMON) or self.appear(self.I_BATTLE_DEMON):
-                break
-
-            if self.ui_reward_appear_click():
-                continue
-            if self.appear_then_click(self.I_UI_BACK_RED, interval=1.5):
-                continue
-            if self.appear_then_click(self.I_ENTER_ENSURE, interval=1):
-                continue
-            if self.appear_then_click(self.I_ENTER2, interval=1):
-                continue
-        if self.config.meta_demon.meta_demon_config.meta_crafting_card:
+        entered = self.enter_meta_demon()
+        if entered and self.config.meta_demon.meta_demon_config.meta_crafting_card:
             self.crafting()
 
-        boss_timer = Timer(50)
-        boss_timer.start()
+        md_config = self.config.meta_demon.meta_demon_config
+        boss_timer = Timer(50).start()
+        idle_timer = Timer(60).start()
+        page_lost_timer = Timer(30).start()
+        friend_boss_seen = [False, False]
         first_battle_for_easy_boss = True
+
         while 1:
-            battle_processing = False
-            is_hard_boss = False  # 五星或者六星
             self.screenshot()
+
+            # 页面有效性：先处理弹窗，连续丢失 30 秒退出
             if not (self.appear(self.I_FIND_DEMON) or self.appear(self.I_BATTLE_DEMON)):
+                if self.ui_reward_appear_click():
+                    page_lost_timer.reset()
+                    continue
+                if self.appear_then_click(self.I_UI_BACK_RED, interval=1.5):
+                    page_lost_timer.reset()
+                    continue
+                if self.appear_then_click(self.I_ENTER_ENSURE, interval=1):
+                    page_lost_timer.reset()
+                    continue
+                if self.appear_then_click(self.I_ENTER2, interval=1):
+                    page_lost_timer.reset()
+                    continue
+                if page_lost_timer.reached():
+                    logger.warning('MetaDemon page lost, exit')
+                    break
                 continue
 
             # 疲劳达到阈值时优先召唤鬼王（开关控制，判定先于原有逻辑）
@@ -147,50 +153,128 @@ class ScriptTask(RightActivity, Battle, GeneralBattle, SwitchSoul, Star56):
             # 是否喝茶 疲劳满了就不打了
             current_exhaustion = self.current_exhaustion()
             if current_exhaustion > 100:
-                if self.config.meta_demon.meta_demon_config.auto_tea:
+                if md_config.auto_tea:
                     logger.info('Exhaustion is full, buy tea')
                     boss_timer.reset()
+                    idle_timer.reset()
                     self.buy_tea()
                 else:
                     logger.info('Exhaustion is full, exit')
                     break
-            # 超时结束
-            if boss_timer.reached():
+
+            # 自己发现
+            self_boss = (not self.appear(self.I_BOSS_EMPTY)) and \
+                        (self.appear(self.I_BOSS_CONVENE) or self.appear(self.I_BOOS_PUBLIC))
+
+            # 好友发现：只处理当前可见的两个槽位
+            friend_slots = []
+            if md_config.auto_shared_boss:
+                for slot in (1, 2):
+                    if self.friend_boss_available(slot):
+                        friend_slots.append(slot)
+
+            # 新好友鬼王通知，按槽位去重
+            for index, slot in enumerate((1, 2)):
+                present = slot in friend_slots
+                if present and not friend_boss_seen[index]:
+                    friend_boss_seen[index] = True
+                    logger.info(f'Friend boss {slot} appeared')
+                    if md_config.md_friend_boss_monitor:
+                        self.config.notifier.push(title='超鬼王', content=f'好友发现新的鬼王（第{slot}个）')
+                elif not present:
+                    friend_boss_seen[index] = False
+
+            # 候选排序
+            candidates = []
+            if md_config.md_friend_boss_first:
+                candidates.extend(('friend', slot) for slot in friend_slots)
+                if self_boss:
+                    candidates.append(('self', 0))
+            else:
+                if self_boss:
+                    candidates.append(('self', 0))
+                candidates.extend(('friend', slot) for slot in friend_slots)
+
+            battle_processing = False
+            is_hard_boss = False
+            if candidates:
+                kind, slot = candidates[0]
+                if kind == 'self':
+                    logger.info('Try to battle boss from self')
+                    if self.select_boss(self.I_BOSS_EMPTY):
+                        battle_processing = True
+                        is_hard_boss = self.is_star56()
+                else:
+                    logger.info(f'Try to battle boss {slot} from friends')
+                    target = self.I_BOSS_EMPTY_1 if slot == 1 else self.I_BOSS_EMPTY_2
+                    if self.select_boss(target):
+                        battle_processing = True
+                        is_hard_boss = True
+                if battle_processing:
+                    boss_timer.reset()
+                    idle_timer.reset()
+
+            # 战斗：详情区已刷新后再读取名称/血量阈值
+            if battle_processing:
+                target_group_team = [None, None]
+                if is_hard_boss:
+                    logger.info('Hard boss')
+                    if md_config.md_use_strategy:
+                        detect_full_name = self.O_MD_FULL_NAME.ocr_single(self.device.image)
+                        logger.info(f'detect_full_name: {detect_full_name}')
+                        if not detect_full_name:
+                            detect_full_name = ''
+                        group_team = self.get_group_team(detect_full_name)
+                        if self.hp_threshold_low(self.device.image):
+                            logger.info('Hp threshold low')
+                            target_group_team = group_team[2:4]
+                        else:
+                            logger.info('Hp threshold high')
+                            target_group_team = group_team[0:2]
+                else:
+                    if md_config.md_use_strategy and first_battle_for_easy_boss:
+                        logger.info('Normal boss first battle use default group team')
+                        target_group_team = self.cached_default_group_team
+                if self.appear(self.I_BATTLE_DEMON):
+                    logger.info(f'preset group team: {target_group_team}')
+                    self.battle_boss(target_group_team[0], target_group_team[1])
+                    if first_battle_for_easy_boss:
+                        first_battle_for_easy_boss = False
+                    if is_hard_boss:
+                        first_battle_for_easy_boss = True
+                    boss_timer.reset()
+                    idle_timer.reset()
+                    page_lost_timer.reset()
+                    continue
+                else:
+                    logger.warning('Battle button disappeared, retry')
+                    continue
+
+            # 非监听模式保持原有 50 秒超时
+            if not md_config.md_friend_boss_monitor and boss_timer.reached():
                 logger.info('Time out, exit')
                 break
-            # 5/6星特殊处理 + 使用自定义策略组
-            target_group_team = [None, None]
-            if is_hard_boss:
-                logger.info('Hard boss')
-                if self.config.meta_demon.meta_demon_config.md_use_strategy:
-                    detect_full_name = self.O_MD_FULL_NAME.ocr_single(self.device.image)
-                    logger.info(f'detect_full_name: {detect_full_name}')
-                    if not detect_full_name:
-                        detect_full_name = ''
-                    group_team = self.get_group_team(detect_full_name)
-                    if self.hp_threshold_low(self.device.image):
-                        logger.info('Hp threshold low')
-                        target_group_team = group_team[2:4]
-                    else:
-                        logger.info('Hp threshold high')
-                        target_group_team = group_team[0:2]
-            else:
-                if self.config.meta_demon.meta_demon_config.md_use_strategy and first_battle_for_easy_boss:
-                    logger.info('Normal boss first battle use default group team')
-                    target_group_team = self.cached_default_group_team
-            if battle_processing and self.appear(self.I_BATTLE_DEMON):
-                logger.info(f'preset group team: {target_group_team}')
-                self.battle_boss(target_group_team[0], target_group_team[1])
-                if first_battle_for_easy_boss:
-                    first_battle_for_easy_boss = False
-                if is_hard_boss:
-                    first_battle_for_easy_boss = True
-                boss_timer.reset()
-                continue
 
             # 自己召唤鬼王
             if current_exhaustion < 90 and self.find_demon():
                 boss_timer.reset()
+                idle_timer.reset()
+                page_lost_timer.reset()
+                continue
+
+            # 监听模式：保持页面轮询，定期重进刷新好友列表
+            if md_config.md_friend_boss_monitor:
+                if idle_timer.reached():
+                    logger.info('No friend boss in 60s, refresh activity page')
+                    self.ui_click(self.I_UI_BACK_YELLOW, self.I_CHECK_MAIN, interval=1.4)
+                    if not self.enter_meta_demon():
+                        logger.warning('Re-enter MetaDemon failed, exit')
+                        break
+                    page_lost_timer.reset()
+                    idle_timer.reset()
+                    boss_timer.reset()
+                else:
+                    sleep(3)
                 continue
 
         # 退出
@@ -198,6 +282,48 @@ class ScriptTask(RightActivity, Battle, GeneralBattle, SwitchSoul, Star56):
         logger.info('Exit MetaDemon')
         self.set_next_run(task="MetaDemon", success=True)
         raise TaskEnd
+
+    def enter_meta_demon(self, timeout: int = 60) -> bool:
+        """进入超鬼王活动页并处理奖励/确认弹窗，直到出现寻找或挑战按钮"""
+        self.enter(self.I_RIGHT_ENTER)
+        timer = Timer(timeout).start()
+        while 1:
+            self.screenshot()
+            if self.appear(self.I_FIND_DEMON) or self.appear(self.I_BATTLE_DEMON):
+                return True
+            if timer.reached():
+                logger.warning('Enter MetaDemon timeout')
+                return False
+            if self.ui_reward_appear_click():
+                continue
+            if self.appear_then_click(self.I_UI_BACK_RED, interval=1.5):
+                continue
+            if self.appear_then_click(self.I_ENTER_ENSURE, interval=1):
+                continue
+            if self.appear_then_click(self.I_ENTER2, interval=1):
+                continue
+
+    def friend_boss_available(self, slot: int) -> bool:
+        """好友发现列表槽位是否有鬼王：空槽模板不匹配且剩余时间 OCR 命中"""
+        empty = self.I_BOSS_EMPTY_1 if slot == 1 else self.I_BOSS_EMPTY_2
+        ocr = self.O_BOSS_EMPTY_1 if slot == 1 else self.O_BOSS_EMPTY_2
+        return (not self.appear(empty)) and self.ocr_appear(ocr)
+
+    def select_boss(self, target, timeout: int = 8) -> bool:
+        """点击自己/好友鬼王卡片，等待详情区刷新出挑战按钮"""
+        timer = Timer(timeout).start()
+        self.click(target)
+        while 1:
+            sleep(0.5)
+            self.screenshot()
+            if self.appear(self.I_BATTLE_DEMON) and timer.current() >= 1:
+                sleep(0.5)
+                self.screenshot()
+                return True
+            if timer.reached():
+                logger.warning('Select boss timeout')
+                return False
+            self.click(target, interval=2)
 
     def current_exhaustion(self) -> int:
         self.screenshot()
@@ -237,29 +363,36 @@ class ScriptTask(RightActivity, Battle, GeneralBattle, SwitchSoul, Star56):
         self.ui_click_until_disappear(self.I_UI_BACK_RED, interval=1)
         sleep(0.5)
 
-    def find_demon(self) -> bool:
+    def find_demon(self, timeout: int = 10) -> bool:
         """
         召唤鬼王
         @return:
         """
         logger.info('Find demon')
+        timer = Timer(timeout).start()
         while 1:
             self.screenshot()
             if self.appear(self.I_BATTLE_DEMON) and not self.appear(self.I_BOSS_EMPTY):
                 break
+            if timer.reached():
+                logger.warning('Find demon timeout')
+                return False
             if self.appear_then_click(self.I_FIND_DEMON, interval=3.5):
                 continue
         self.screenshot()
         if self.is_star56():
             logger.info('Star 5 or 6 demon found')
+            name_timer = Timer(5).start()
+            detect_full_name = ''
             while 1:
                 sleep(0.4)
                 self.screenshot()
                 detect_full_name = self.O_MD_FULL_NAME.ocr_single(self.device.image)
-                if detect_full_name:
+                if detect_full_name or name_timer.reached():
                     break
-            logger.info(f'召唤到高星鬼王: {detect_full_name}')
-            self.config.notifier.push(content=f'召唤到高星鬼王: {detect_full_name}', title='超鬼王')
+            if detect_full_name:
+                logger.info(f'召唤到高星鬼王: {detect_full_name}')
+                self.config.notifier.push(content=f'召唤到高星鬼王: {detect_full_name}', title='超鬼王')
         return True
 
     def battle_boss(self, group: int = None, team: int = None) -> bool:

@@ -69,5 +69,7 @@ class MetaDemonAssets:
 	O_MD_FULL_NAME = RuleOcr(roi=(479,116,100,217), area=(479,116,100,217), mode="Full", method="Default", keyword="", name="md_full_name")
 	# 判断别人是否给鬼王 
 	O_BOSS_EMPTY_1 = RuleOcr(roi=(141,400,94,32), area=(141,400,94,32), mode="Single", method="Default", keyword="剩余时间", name="boss_empty_1")
+	# 判断第二个好友是否有鬼王
+	O_BOSS_EMPTY_2 = RuleOcr(roi=(141,520,94,32), area=(141,520,94,32), mode="Single", method="Default", keyword="剩余时间", name="boss_empty_2")
 
 

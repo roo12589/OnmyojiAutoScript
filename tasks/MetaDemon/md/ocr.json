@@ -52,5 +52,14 @@
     "method": "Default",
     "keyword": "剩余时间",
     "description": "判断别人是否给鬼王"
+  },
+  {
+    "itemName": "boss_empty_2",
+    "roiFront": "141,520,94,32",
+    "roiBack": "141,520,94,32",
+    "mode": "Single",
+    "method": "Default",
+    "keyword": "剩余时间",
+    "description": "判断第二个好友是否有鬼王"
   }
 ]
