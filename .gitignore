@@ -275,3 +275,8 @@ oas.bat
 
 # Per-instance FrogBoss prediction and result history
 data/frog_oas/
+
+# Task run statistics
+data/*.db
+data/*.db-wal
+data/*.db-shm

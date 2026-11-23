@@ -38,6 +38,7 @@ from module.base.decorator import del_cached_property
 from module.logger import logger
 from module.exception import *
 from module.server.i18n import I18n
+from module.stats.task_record import record_task_run, prune_old_records
 from module.ocr.rpc import ensure_ocr_server_started
 
 
@@ -58,6 +59,10 @@ class Script:
         # Failure count of tasks
         # Key: str, task name, value: int, failure count
         self.failure_record = {}
+        # 任务运行记录采集
+        self._task_executed = False  # 本次调度是否真的执行了任务
+        self._current_task_error_type = None
+        self._current_task_error_message = None
         # 运行loop的线程
         self.loop_thread: Thread = None
         # 跨进程排队管理器（仅在 queue_mode=True 时初始化）
@@ -542,6 +547,10 @@ class Script:
         :param command:  大写驼峰命名的任务名字
         :return:
         """
+        self._task_executed = False
+        self._current_task_error_type = None
+        self._current_task_error_message = None
+
         if command == 'start' or command == 'goto_main':
             logger.error(f'Invalid command `{command}`')
 
@@ -571,16 +580,21 @@ class Script:
             module_path = str(Path.cwd() / 'tasks' / command / (module_name+'.py'))
             logger.info(f'module_path: {module_path}, module_name: {module_name}')
             task_module = load_module(module_name, module_path)
+            self._task_executed = True
             task_module.ScriptTask(config=self.config, device=self.device).run()
         except TaskEnd:
             return True
         except GameNotRunningError as e:
             logger.warning(e)
+            self._current_task_error_type = type(e).__name__
+            self._current_task_error_message = str(e)[:2000]
             self.exception_handler(e=e, command=command)
             self.config.task_call('Restart')
             return True
         except (GameStuckError, GameTooManyClickError) as e:
             logger.error(e)
+            self._current_task_error_type = type(e).__name__
+            self._current_task_error_message = str(e)[:2000]
             self.save_error_log()
             self.exception_handler(e=e, command=command)
             logger.warning(f'Game stuck, {self.device.package} will be restarted in 10 seconds')
@@ -591,6 +605,8 @@ class Script:
             return False
         except GameBugError as e:
             logger.warning(e)
+            self._current_task_error_type = type(e).__name__
+            self._current_task_error_message = str(e)[:2000]
             self.save_error_log()
             self.exception_handler(e=e, command=command)
             logger.warning('An error has occurred in Azur Lane game client, Alas is unable to handle')
@@ -602,6 +618,8 @@ class Script:
             logger.info('Game server may be under maintenance or network may be broken, check server status now')
             # 这个还不重要 留着坑填
             logger.critical('Game page unknown')
+            self._current_task_error_type = type(e).__name__
+            self._current_task_error_message = str(e)[:2000]
             self.save_error_log()
             self.exception_handler(e=e, command=command)
             self.config.notifier.push(title=f'{I18n.trans_zh_cn(command)}{command}', content=f"<{self.config_name}> GamePageUnknownError")
@@ -610,18 +628,24 @@ class Script:
             return False
         except ScriptError as e:
             logger.critical(e)
+            self._current_task_error_type = type(e).__name__
+            self._current_task_error_message = str(e)[:2000]
             self.exception_handler(e=e, command=command)
             logger.critical('This is likely to be a mistake of developers, but sometimes just random issues')
             self.config.notifier.push(title=f'{I18n.trans_zh_cn(command)}{command}', content=f"<{self.config_name}> ScriptError")
             exit(1)
         except RequestHumanTakeover as e:
             logger.critical(e)
+            self._current_task_error_type = type(e).__name__
+            self._current_task_error_message = str(e)[:2000]
             self.exception_handler(e=e, command=command)
             logger.critical('Request human takeover')
             self.config.notifier.push(title=f'{I18n.trans_zh_cn(command)}{command}', content=f"<{self.config_name}> RequestHumanTakeover")
             exit(1)
         except Exception as e:
             logger.exception(e)
+            self._current_task_error_type = type(e).__name__
+            self._current_task_error_message = str(e)[:2000]
             self.exception_handler(e=e, command=command)
             self.save_error_log()
             self.config.notifier.push(title=f'{I18n.trans_zh_cn(command)}{command}', content=f"<{self.config_name}> Exception occured")
@@ -654,6 +678,7 @@ class Script:
                 with _log_switch_lock:
                     logger.set_file_logger(self.config_name, do_cleanup=True)
                 start_day = date.today()
+                prune_old_records()
             # Check update event from GUI
             # if self.stop_event is not None:
             #     if self.stop_event.is_set():
@@ -705,8 +730,23 @@ class Script:
             self.device.click_record_clear()
             logger.hr(task, level=0)
             self.config.model.running_task = task
+            task_name = inflection.camelize(task)
             _task_start = datetime.now()
-            success = self.run(inflection.camelize(task))
+            self._task_executed = False
+            success = False
+            try:
+                success = self.run(task_name)
+            finally:
+                if self._task_executed:
+                    record_task_run(
+                        config_name=self.config_name,
+                        task_name=task_name,
+                        start_time=_task_start,
+                        end_time=datetime.now(),
+                        success=success,
+                        error_type=self._current_task_error_type,
+                        error_message=self._current_task_error_message,
+                    )
             self.config.model.running_task = ''
             logger.info(f'Scheduler: End task `{task}`')
             self.is_first_task = False

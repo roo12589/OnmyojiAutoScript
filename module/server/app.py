@@ -15,6 +15,7 @@ from module.logger import logger
 from module.server.home_router import home_app
 from module.server.script_router import script_app
 from module.server.tool_router import tool_app
+from module.server.statistics_router import stats_app
 from module.server.setting import State
 from module.server.main_manager import mm
 from starlette.staticfiles import StaticFiles
@@ -44,6 +45,7 @@ app.add_middleware(
 app.include_router(home_app)
 app.include_router(script_app)
 app.include_router(tool_app)
+app.include_router(stats_app)
 
 annotator_static_dir = Path(__file__).resolve().parent / "web" / "annotator" / "static"
 
@@ -72,6 +74,9 @@ async def on_startup():
     :return:
     """
     logger.info('OAS web service startup done')
+    from module.stats import task_record
+    task_record.init_db()
+    task_record.prune_old_records()
     if app.state.script_instances:
         await mm.restart_processes(app.state.script_instances)
 
